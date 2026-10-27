@@ -1,0 +1,5 @@
+bin/
+.dev-data/
+data/
+*.test
+*.out

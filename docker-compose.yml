@@ -1,0 +1,19 @@
+# 3 raft voters + 3 storage-only nodes, 4+2 coding. Public API of every node: localhost:9001..9006
+x-node: &node
+  image: objstore:dev
+  restart: unless-stopped
+  environment:
+    OBJSTORE_CLUSTER_SECRET: change-me-cluster
+    OBJSTORE_API_TOKEN: change-me-api
+
+x-voters: &voters --voters=n1=n1:9000,n2=n2:9000,n3=n3:9000
+
+services:
+  n1: { <<: *node, command: ["--id=n1", "--advertise=n1:9000", "--zone=a", *voters, "-k=4", "-m=2"], ports: ["9001:9000"], volumes: ["n1:/data"] }
+  n2: { <<: *node, command: ["--id=n2", "--advertise=n2:9000", "--zone=b", *voters, "-k=4", "-m=2"], ports: ["9002:9000"], volumes: ["n2:/data"] }
+  n3: { <<: *node, command: ["--id=n3", "--advertise=n3:9000", "--zone=c", *voters, "-k=4", "-m=2"], ports: ["9003:9000"], volumes: ["n3:/data"] }
+  n4: { <<: *node, command: ["--id=n4", "--advertise=n4:9000", "--zone=a", *voters, "-k=4", "-m=2"], ports: ["9004:9000"], volumes: ["n4:/data"] }
+  n5: { <<: *node, command: ["--id=n5", "--advertise=n5:9000", "--zone=b", *voters, "-k=4", "-m=2"], ports: ["9005:9000"], volumes: ["n5:/data"] }
+  n6: { <<: *node, command: ["--id=n6", "--advertise=n6:9000", "--zone=c", *voters, "-k=4", "-m=2"], ports: ["9006:9000"], volumes: ["n6:/data"] }
+
+volumes: { n1: {}, n2: {}, n3: {}, n4: {}, n5: {}, n6: {} }
