@@ -105,8 +105,9 @@ aws --endpoint-url http://localhost:9100 s3 cp ./big.iso s3://media/big.iso
 SigV4 (header and presigned), `aws-chunked` streaming uploads, buckets, Put/Get/Head/Delete, `Range`,
 CopyObject, DeleteObjects, ListObjectsV2 (+v1) with prefix/delimiter/paging, and the full multipart
 flow, bucket versioning (`?versioning`, `?versions`, `versionId=`, delete markers) and lifecycle
-(`?lifecycle`: expiration days, noncurrent-version expiration, expired delete markers). Not there:
-bucket policies/ACLs, SSE, virtual-host-style addressing, suspending versioning, delimiter in
+(`?lifecycle`: expiration days, noncurrent-version expiration, expired delete markers). Suspending versioning works
+(writes then replace the "null" version). Not there:
+bucket policies/ACLs, SSE, virtual-host-style addressing, delimiter in
 `?versions`. One difference to know about: ETags are SHA-256 hex, not MD5, so clients that insist on
 comparing an MD5 ETag will complain.
 
@@ -150,5 +151,5 @@ docs/ARCHITECTURE.md
 ## Known limits
 
 Metadata is memory-resident on the voters (about 650 bytes per object version, see the footprint test;
-snapshots are gzip'd). No bucket policies or SSE, and versioning cannot be suspended. See the
+snapshots are gzip'd). No bucket policies or SSE. See the
 trade-offs section of the architecture doc for the reasoning.

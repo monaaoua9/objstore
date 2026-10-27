@@ -19,10 +19,16 @@ func (s *Server) putVersioning(w http.ResponseWriter, r *http.Request, bucket st
 	if err := xml.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
 		return errf(400, "MalformedXML", "the xml you provided was not well-formed")
 	}
-	if req.Status != "Enabled" {
-		return errf(501, "NotImplemented", "versioning can be enabled but not suspended")
+	var err error
+	switch req.Status {
+	case "Enabled":
+		err = s.Meta.EnableVersioning(r.Context(), bucket)
+	case "Suspended":
+		err = s.Meta.SuspendVersioning(r.Context(), bucket)
+	default:
+		return errf(400, "MalformedXML", "Status must be Enabled or Suspended")
 	}
-	if err := s.Meta.EnableVersioning(r.Context(), bucket); err != nil {
+	if err != nil {
 		return err
 	}
 	w.WriteHeader(200)
@@ -41,6 +47,8 @@ func (s *Server) getVersioning(w http.ResponseWriter, r *http.Request, bucket st
 			found = true
 			if b.Versioning {
 				status = "Enabled"
+			} else if b.Suspended {
+				status = "Suspended"
 			}
 		}
 	}

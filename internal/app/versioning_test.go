@@ -24,10 +24,6 @@ func TestS3Versioning(t *testing.T) {
 	if !strings.Contains(string(b), "<Status>Enabled</Status>") {
 		t.Fatalf("versioning not reported: %s", b)
 	}
-	resp, b = c.s3("n1", "PUT", "/vers?versioning", []byte(`<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>`), nil)
-	if resp.StatusCode != 501 {
-		t.Fatalf("suspend should be refused: %d %s", resp.StatusCode, b)
-	}
 
 	d1, d2 := randBytes(90_000), randBytes(70_000)
 	resp, b = c.s3("n1", "PUT", "/vers/doc.txt", d1, nil)
@@ -135,5 +131,64 @@ func TestOldVersionsSurviveNodeLoss(t *testing.T) {
 	want(t, resp, b, 200)
 	if !bytes.Equal(b, d1) {
 		t.Fatal("old version unreadable with m nodes down")
+	}
+}
+
+func TestS3VersioningSuspend(t *testing.T) {
+	c := newCluster(t, 3, 3, 3, 2)
+	c.s3("n1", "PUT", "/susp", nil, nil)
+	susp := []byte(`<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>`)
+	on := []byte(`<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>`)
+
+	resp, b := c.s3("n1", "PUT", "/susp?versioning", on, nil)
+	want(t, resp, b, 200)
+	d1 := randBytes(40_000)
+	resp, b = c.s3("n1", "PUT", "/susp/k", d1, nil)
+	want(t, resp, b, 200)
+	v1 := resp.Header.Get("x-amz-version-id")
+
+	resp, b = c.s3("n2", "PUT", "/susp?versioning", susp, nil)
+	want(t, resp, b, 200)
+	resp, b = c.s3("n3", "GET", "/susp?versioning", nil, nil)
+	if !strings.Contains(string(b), "<Status>Suspended</Status>") {
+		t.Fatalf("suspended not reported: %s", b)
+	}
+
+	// two writes while suspended leave exactly one null version on top of v1
+	c.s3("n1", "PUT", "/susp/k", randBytes(10_000), nil)
+	d3 := randBytes(20_000)
+	resp, b = c.s3("n2", "PUT", "/susp/k", d3, nil)
+	want(t, resp, b, 200)
+	resp, b = c.s3("n3", "GET", "/susp?versions", nil, nil)
+	want(t, resp, b, 200)
+	if n := strings.Count(string(b), "<Version>"); n != 2 {
+		t.Fatalf("want 2 versions (null + v1), got %d: %s", n, b)
+	}
+	if !strings.Contains(string(b), "<VersionId>null</VersionId>") || !strings.Contains(string(b), v1) {
+		t.Fatalf("listing: %s", b)
+	}
+	resp, b = c.s3("n1", "GET", "/susp/k?versionId="+v1, nil, nil)
+	want(t, resp, b, 200)
+	if !bytes.Equal(b, d1) {
+		t.Fatal("enabled-era version lost")
+	}
+	resp, b = c.s3("n1", "GET", "/susp/k?versionId=null", nil, nil)
+	want(t, resp, b, 200)
+	if !bytes.Equal(b, d3) {
+		t.Fatal("null version should hold the last write")
+	}
+
+	// delete while suspended: null marker replaces the null version, v1 survives
+	resp, b = c.s3("n1", "DELETE", "/susp/k", nil, nil)
+	want(t, resp, b, 204)
+	resp, b = c.s3("n1", "GET", "/susp/k", nil, nil)
+	if resp.StatusCode != 404 {
+		t.Fatalf("deleted key should 404: %d", resp.StatusCode)
+	}
+	resp, b = c.s3("n1", "GET", "/susp/k?versionId="+v1, nil, nil)
+	want(t, resp, b, 200)
+	resp, b = c.s3("n3", "GET", "/susp?versions", nil, nil)
+	if n := strings.Count(string(b), "<Version>"); n != 1 || strings.Count(string(b), "<DeleteMarker>") != 1 {
+		t.Fatalf("after suspended delete: %s", b)
 	}
 }

@@ -690,23 +690,29 @@ func (g *Gateway) getVersioning(w http.ResponseWriter, r *http.Request) {
 		g.fail(w, r, err)
 		return
 	}
-	writeJSON(w, 200, map[string]bool{"enabled": b.Versioning}, nil)
+	writeJSON(w, 200, map[string]bool{"enabled": b.Versioning, "suspended": b.Suspended}, nil)
 }
 
-// there is deliberately no way back: once versions exist, switching it off would orphan them
+// "enabled": false suspends rather than disables; existing versions stay addressable
 func (g *Gateway) putVersioning(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Enabled bool `json:"enabled"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body); err != nil || !body.Enabled {
-		writeErr(w, 400, "INVALID_BODY", `expected {"enabled":true}; versioning cannot be turned off once on`)
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body); err != nil {
+		writeErr(w, 400, "INVALID_BODY", `expected {"enabled":true} or {"enabled":false}`)
 		return
 	}
-	if err := g.Meta.EnableVersioning(r.Context(), r.PathValue("bucket")); err != nil {
+	var err error
+	if body.Enabled {
+		err = g.Meta.EnableVersioning(r.Context(), r.PathValue("bucket"))
+	} else {
+		err = g.Meta.SuspendVersioning(r.Context(), r.PathValue("bucket"))
+	}
+	if err != nil {
 		g.fail(w, r, err)
 		return
 	}
-	writeJSON(w, 200, map[string]bool{"enabled": true}, nil)
+	writeJSON(w, 200, map[string]bool{"enabled": body.Enabled, "suspended": !body.Enabled}, nil)
 }
 
 func (g *Gateway) listVersions(w http.ResponseWriter, r *http.Request) {

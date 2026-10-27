@@ -217,8 +217,9 @@ fall out of that. In a bucket with versioning on, the FSM keeps `objs[key]` as t
 it; plain delete pushes a **delete marker** (no shards) on top; deleting a specific version removes
 that entry, retires its shards for GC, and promotes the next entry if it was current. Older versions
 stay in the live-placement index, so audit, scrub, repair and rebalance keep protecting them.
-Listings hide markers; `list_versions` pages by `(key, version)`. Versioning can be turned on but
-not off, because switching off with history present has no sane meaning.
+Listings hide markers; `list_versions` pages by `(key, version)`. Versioning can be suspended but
+never fully switched off: history stays. While suspended, writes and deletes act on the single
+"null" version (`Object.Null`, addressable as `versionId=null`) and leave older versions alone.
 
 Lifecycle rules live on the bucket but are **evaluated by the leader's supervisor**, not the FSM,
 because the FSM may not read a clock. The supervisor plans from listings (expire current versions

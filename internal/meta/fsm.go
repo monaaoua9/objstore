@@ -67,6 +67,7 @@ type cmd struct {
 	Upload   *Upload         `json:"upload,omitempty"`
 	Sel      []PartSel       `json:"sel,omitempty"`
 	Rules    []LifecycleRule `json:"rules,omitempty"`
+	Suspend  bool            `json:"suspend,omitempty"`
 }
 
 type query struct {
@@ -130,11 +131,17 @@ func (b *bucketState) pushHist(o *Object) {
 
 // supersede is what a new write does to the object it replaces
 func (f *FSM) supersede(b *bucketState, old *Object) {
-	if b.Versioning {
+	// objects from before suspension never had Null set; they stay as history, which is the safe side
+	if b.Versioning || (b.Suspended && !old.Null) {
 		b.pushHist(old)
 	} else {
 		f.retire(old)
 	}
+}
+
+// vmatch lets callers address the null version by the literal id "null"
+func vmatch(o *Object, v string) bool {
+	return o.Version == v || (v == "null" && o.Null)
 }
 
 func (b *bucketState) put(o *Object) {
@@ -248,6 +255,7 @@ func (f *FSM) apply(c *cmd) result {
 		if old, ok := b.objs[o.Key]; ok {
 			f.supersede(b, old)
 		}
+		o.Null = !b.Versioning
 		f.internObj(o)
 		b.put(o)
 		f.versions[o.Version] = o
@@ -261,11 +269,11 @@ func (f *FSM) apply(c *cmd) result {
 			return errResult("BUCKET_NOT_FOUND")
 		}
 		old, ok := b.objs[c.Key]
-		if b.Versioning {
+		if b.Versioning || b.Suspended {
 			// deleting in a versioned bucket only hides the key behind a marker
-			m := &Object{Bucket: c.Bucket, Key: c.Key, Version: c.Version, Created: c.At, DeleteMarker: true}
+			m := &Object{Bucket: c.Bucket, Key: c.Key, Version: c.Version, Created: c.At, DeleteMarker: true, Null: !b.Versioning}
 			if ok {
-				b.pushHist(old)
+				f.supersede(b, old)
 			}
 			b.put(m)
 			return result{Object: m}
@@ -300,7 +308,13 @@ func (f *FSM) apply(c *cmd) result {
 		if !ok {
 			return errResult("BUCKET_NOT_FOUND")
 		}
-		b.Versioning = true
+		if c.Suspend {
+			if b.Versioning {
+				b.Versioning, b.Suspended = false, true
+			}
+		} else {
+			b.Versioning, b.Suspended = true, false
+		}
 
 	case opSetNode:
 		n := *c.Node
@@ -389,7 +403,7 @@ func (f *FSM) deleteVersion(b *bucketState, key, version string) bool {
 	if !ok {
 		return false
 	}
-	if cur.Version == version {
+	if vmatch(cur, version) {
 		if h := b.hist[key]; len(h) > 0 {
 			b.objs[key] = h[0]
 			if len(h) == 1 {
@@ -405,7 +419,7 @@ func (f *FSM) deleteVersion(b *bucketState, key, version string) bool {
 	}
 	h := b.hist[key]
 	for i, o := range h {
-		if o.Version == version {
+		if vmatch(o, version) {
 			rest := append(append([]*Object(nil), h[:i]...), h[i+1:]...)
 			if len(rest) == 0 {
 				delete(b.hist, key)
@@ -592,11 +606,11 @@ func (f *FSM) query(q *query) result {
 		if !ok {
 			return errResult("BUCKET_NOT_FOUND")
 		}
-		if o := b.objs[q.Key]; o != nil && o.Version == q.Version {
+		if o := b.objs[q.Key]; o != nil && vmatch(o, q.Version) {
 			return result{Object: o}
 		}
 		for _, o := range b.hist[q.Key] {
-			if o.Version == q.Version {
+			if vmatch(o, q.Version) {
 				return result{Object: o}
 			}
 		}
@@ -619,7 +633,7 @@ func (f *FSM) query(q *query) result {
 			from := 0
 			if k == q.After && q.Version != "" {
 				for j, o := range seq {
-					if o.Version == q.Version {
+					if vmatch(o, q.Version) {
 						from = j + 1
 						break
 					}
@@ -634,7 +648,11 @@ func (f *FSM) query(q *query) result {
 					return res
 				}
 				o := seq[j]
-				res.VItems = append(res.VItems, VersionItem{k, o.Version, j == 0, o.DeleteMarker, o.Size, o.ETag, o.Created})
+				vid := o.Version
+				if o.Null {
+					vid = "null"
+				}
+				res.VItems = append(res.VItems, VersionItem{k, vid, j == 0, o.DeleteMarker, o.Size, o.ETag, o.Created})
 			}
 		}
 		return res

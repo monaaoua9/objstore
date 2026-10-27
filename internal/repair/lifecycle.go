@@ -55,7 +55,7 @@ func (s *Supervisor) applyLifecycle(ctx context.Context, b meta.Bucket) {
 				cursor = next
 			}
 		}
-		if (r.NoncurrentDays > 0 || r.CleanMarkers) && b.Versioning {
+		if (r.NoncurrentDays > 0 || r.CleanMarkers) && (b.Versioning || b.Suspended) {
 			plan = append(plan, s.planVersions(ctx, b.Name, r, age, budget-len(plan))...)
 		}
 	}

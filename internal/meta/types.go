@@ -71,6 +71,9 @@ type Object struct {
 	Parts []PartRef `json:"parts,omitempty"`
 	// DeleteMarker entries exist only in versioned buckets: no data, they just hide older versions.
 	DeleteMarker bool `json:"delete_marker,omitempty"`
+	// Null marks the version s3 calls "null": written while versioning was off or suspended.
+	// A bucket holds at most one per key and a suspended write replaces it.
+	Null bool `json:"null,omitempty"`
 }
 
 // VersionItem is one row of a version listing (current version first, then older ones).
@@ -97,6 +100,7 @@ type Bucket struct {
 	Name       string          `json:"name"`
 	Created    time.Time       `json:"created"`
 	Versioning bool            `json:"versioning,omitempty"`
+	Suspended  bool            `json:"suspended,omitempty"`
 	Lifecycle  []LifecycleRule `json:"lifecycle,omitempty"`
 }
 

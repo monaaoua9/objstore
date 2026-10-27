@@ -99,6 +99,11 @@ func (c *Client) EnableVersioning(ctx context.Context, bucket string) error {
 	return err
 }
 
+func (c *Client) SuspendVersioning(ctx context.Context, bucket string) error {
+	_, err := c.apply(ctx, cmd{Op: opVersioning, Bucket: bucket, Suspend: true})
+	return err
+}
+
 func (c *Client) GetObject(ctx context.Context, bucket, key string) (*Object, error) {
 	r, err := c.ask(ctx, query{Op: qGetObject, Bucket: bucket, Key: key})
 	if err == nil && r.Object != nil && r.Object.DeleteMarker {
