@@ -150,6 +150,6 @@ docs/ARCHITECTURE.md
 
 ## Known limits
 
-Metadata is memory-resident on the voters (about 650 bytes per object version, see the footprint test;
-snapshots are gzip'd). No bucket policies or SSE. See the
+Metadata records are spilled to disk on the voters and only an index stays in memory (about 275 bytes per
+object version, see the footprint test; snapshots are gzip'd). No bucket policies or SSE. See the
 trade-offs section of the architecture doc for the reasoning.

@@ -88,6 +88,8 @@ type Node struct {
 	Scrb *scrub.Scrubber
 	Sup  *repair.Supervisor
 
+	fsm *meta.FSM
+
 	addr   string
 	srv    *http.Server
 	s3srv  *http.Server
@@ -166,7 +168,11 @@ func Start(cfg Config) (*Node, error) {
 
 	var backend meta.Backend
 	if _, isVoter := cfg.Voters[cfg.ID]; isVoter || cfg.Join {
-		fsm := meta.NewFSM()
+		fsm, err := meta.NewFSMAt(filepath.Join(cfg.DataDir, "meta-objects.spill"))
+		if err != nil {
+			cancel()
+			return nil, err
+		}
 		st, err := raft.NewFileStorage(filepath.Join(cfg.DataDir, "raft"), cfg.RaftNoSync)
 		if err != nil {
 			cancel()
@@ -197,6 +203,7 @@ func Start(cfg Config) (*Node, error) {
 			return nil, fmt.Errorf("start raft: %w", err)
 		}
 		n.Raft = rn
+		n.fsm = fsm
 		rb := &meta.RaftBackend{Node: rn, FSM: fsm}
 		raft.Mount(mux, rn, guard)
 		meta.Mount(mux, rb, guard)
@@ -390,6 +397,7 @@ func (n *Node) Stop() {
 	n.Eng.Wait()
 	if n.Raft != nil {
 		n.Raft.Stop()
+		n.fsm.Close()
 	}
 }
 
@@ -403,6 +411,7 @@ func (n *Node) Kill() {
 	n.wg.Wait()
 	if n.Raft != nil {
 		n.Raft.Stop()
+		n.fsm.Close()
 	}
 }
 

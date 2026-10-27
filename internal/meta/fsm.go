@@ -116,24 +116,25 @@ func errResult(code string) result { return result{Code: code} }
 
 type bucketState struct {
 	Bucket
-	objs map[string]*Object
+	objs map[string]oref
 	keys []string // sorted
 	// hist holds the older versions of a key, newest first; objs[key] is always the current one
-	hist map[string][]*Object
+	hist map[string][]oref
 }
 
-func (b *bucketState) pushHist(o *Object) {
+func (b *bucketState) pushHist(key string, r oref) {
 	if b.hist == nil {
-		b.hist = map[string][]*Object{}
+		b.hist = map[string][]oref{}
 	}
-	b.hist[o.Key] = append([]*Object{o}, b.hist[o.Key]...)
+	b.hist[key] = append([]oref{r}, b.hist[key]...)
 }
 
 // supersede is what a new write does to the object it replaces
-func (f *FSM) supersede(b *bucketState, old *Object) {
+func (f *FSM) supersede(b *bucketState, key string, r oref) {
+	old := f.st.get(r)
 	// objects from before suspension never had Null set; they stay as history, which is the safe side
 	if b.Versioning || (b.Suspended && !old.Null) {
-		b.pushHist(old)
+		b.pushHist(key, r)
 	} else {
 		f.retire(old)
 	}
@@ -144,14 +145,14 @@ func vmatch(o *Object, v string) bool {
 	return o.Version == v || (v == "null" && o.Null)
 }
 
-func (b *bucketState) put(o *Object) {
-	if _, ok := b.objs[o.Key]; !ok {
-		i := sort.SearchStrings(b.keys, o.Key)
+func (b *bucketState) put(key string, r oref) {
+	if _, ok := b.objs[key]; !ok {
+		i := sort.SearchStrings(b.keys, key)
 		b.keys = append(b.keys, "")
 		copy(b.keys[i+1:], b.keys[i:])
-		b.keys[i] = o.Key
+		b.keys[i] = key
 	}
-	b.objs[o.Key] = o
+	b.objs[key] = r
 }
 
 func (b *bucketState) del(key string) {
@@ -165,7 +166,8 @@ func (b *bucketState) del(key string) {
 type FSM struct {
 	mu       sync.RWMutex
 	buckets  map[string]*bucketState
-	versions map[string]*Object
+	versions map[string]oref
+	st       *ostore
 	nodes    map[string]*Node
 	damaged  map[string]map[int]Damage
 	gc       map[string][]ShardLoc
@@ -196,15 +198,87 @@ func (f *FSM) internObj(o *Object) {
 	}
 }
 
+// NewFSM keeps object records in memory (tests, tools).
 func NewFSM() *FSM {
-	f := &FSM{}
+	st, _ := newStore("")
+	f := &FSM{st: st}
 	f.reset()
 	return f
 }
 
+// NewFSMAt spills object records to a file. The file is truncated: raft rebuilds it on start.
+func NewFSMAt(path string) (*FSM, error) {
+	st, err := newStore(path)
+	if err != nil {
+		return nil, err
+	}
+	f := &FSM{st: st}
+	f.reset()
+	return f, nil
+}
+
+// Close releases the spill file. The FSM must not be used afterwards.
+func (f *FSM) Close() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.st.close()
+}
+
+func (f *FSM) save(o *Object) oref { return f.st.put(o) }
+
+// replace stores a modified copy of an object and repoints everything that held the old record
+func (f *FSM) replace(old oref, o *Object) {
+	nr := f.save(o)
+	f.versions[o.Version] = nr
+	b := f.buckets[o.Bucket]
+	if b == nil {
+		return
+	}
+	if b.objs[o.Key] == old {
+		b.objs[o.Key] = nr
+	}
+	for i, h := range b.hist[o.Key] {
+		if h == old {
+			b.hist[o.Key][i] = nr
+		}
+	}
+}
+
+// compact rewrites the live records into a fresh store; every overwrite leaves the old record behind
+func (f *FSM) compact() {
+	ns, err := newStore(f.st.newPath())
+	if err != nil {
+		die(err)
+	}
+	moved := map[int64]oref{}
+	mv := func(r oref) oref {
+		if n, ok := moved[r.off]; ok {
+			return n
+		}
+		n := ns.copyRaw(f.st, r)
+		moved[r.off] = n
+		return n
+	}
+	for v, r := range f.versions {
+		f.versions[v] = mv(r)
+	}
+	for _, b := range f.buckets {
+		for k, r := range b.objs {
+			b.objs[k] = mv(r)
+		}
+		for _, h := range b.hist {
+			for i := range h {
+				h[i] = mv(h[i])
+			}
+		}
+	}
+	f.st.settle(ns)
+}
+
 func (f *FSM) reset() {
 	f.buckets = map[string]*bucketState{}
-	f.versions = map[string]*Object{}
+	f.st.clear()
+	f.versions = map[string]oref{}
 	f.nodes = map[string]*Node{}
 	f.damaged = map[string]map[int]Damage{}
 	f.gc = map[string][]ShardLoc{}
@@ -220,7 +294,11 @@ func (f *FSM) Apply(_ uint64, data []byte) []byte {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return mustJSON(f.apply(&c))
+	out := mustJSON(f.apply(&c))
+	if f.st.wantCompact() {
+		f.compact()
+	}
+	return out
 }
 
 func (f *FSM) apply(c *cmd) result {
@@ -229,7 +307,7 @@ func (f *FSM) apply(c *cmd) result {
 		if _, ok := f.buckets[c.Bucket]; ok {
 			return errResult("BUCKET_EXISTS")
 		}
-		f.buckets[c.Bucket] = &bucketState{Bucket: Bucket{Name: c.Bucket, Created: c.At}, objs: map[string]*Object{}}
+		f.buckets[c.Bucket] = &bucketState{Bucket: Bucket{Name: c.Bucket, Created: c.At}, objs: map[string]oref{}}
 
 	case opDeleteBucket:
 		b, ok := f.buckets[c.Bucket]
@@ -245,7 +323,7 @@ func (f *FSM) apply(c *cmd) result {
 		o := c.Obj
 		b, ok := f.buckets[o.Bucket]
 		if !ok && o.Bucket == MPUBucket {
-			b = &bucketState{Bucket: Bucket{Name: MPUBucket, Created: c.At}, objs: map[string]*Object{}}
+			b = &bucketState{Bucket: Bucket{Name: MPUBucket, Created: c.At}, objs: map[string]oref{}}
 			f.buckets[MPUBucket] = b
 			ok = true
 		}
@@ -253,12 +331,13 @@ func (f *FSM) apply(c *cmd) result {
 			return errResult("BUCKET_NOT_FOUND")
 		}
 		if old, ok := b.objs[o.Key]; ok {
-			f.supersede(b, old)
+			f.supersede(b, o.Key, old)
 		}
 		o.Null = !b.Versioning
 		f.internObj(o)
-		b.put(o)
-		f.versions[o.Version] = o
+		r := f.save(o)
+		b.put(o.Key, r)
+		f.versions[o.Version] = r
 		for _, i := range c.Degraded {
 			f.markDamaged(o.Version, i, "write-degraded", c.At)
 		}
@@ -273,16 +352,16 @@ func (f *FSM) apply(c *cmd) result {
 			// deleting in a versioned bucket only hides the key behind a marker
 			m := &Object{Bucket: c.Bucket, Key: c.Key, Version: c.Version, Created: c.At, DeleteMarker: true, Null: !b.Versioning}
 			if ok {
-				f.supersede(b, old)
+				f.supersede(b, c.Key, old)
 			}
-			b.put(m)
+			b.put(c.Key, f.save(m))
 			return result{Object: m}
 		}
 		if !ok {
 			return errResult("OBJECT_NOT_FOUND")
 		}
 		b.del(c.Key)
-		f.retire(old)
+		f.retire(f.st.get(old))
 
 	case opDeleteVer:
 		b, ok := f.buckets[c.Bucket]
@@ -344,8 +423,12 @@ func (f *FSM) apply(c *cmd) result {
 		delete(f.nodes, c.NodeID)
 
 	case opDamaged:
-		o, ok := f.versions[c.Version]
-		if !ok || c.Index < 0 || c.Index >= len(o.Shards) {
+		r, ok := f.versions[c.Version]
+		if !ok {
+			return result{Code: "GONE"}
+		}
+		o := f.st.get(r)
+		if c.Index < 0 || c.Index >= len(o.Shards) {
 			return result{Code: "GONE"}
 		}
 		// a node reporting its own shard must still be the recorded holder, else it's a stale copy
@@ -355,17 +438,23 @@ func (f *FSM) apply(c *cmd) result {
 		f.markDamaged(c.Version, c.Index, c.Reason, c.At)
 
 	case opRelocate:
-		o, ok := f.versions[c.Version]
-		if !ok || c.Index < 0 || c.Index >= len(o.Shards) {
+		r, ok := f.versions[c.Version]
+		if !ok {
+			return result{Code: "GONE"}
+		}
+		o := f.st.get(r)
+		if c.Index < 0 || c.Index >= len(o.Shards) {
 			return result{Code: "GONE"}
 		}
 		if o.Shards[c.Index].Node != c.From {
 			return errResult("STALE_PLACEMENT")
 		}
-		// copy-on-write: readers holding the old slice (via snapshot encode) stay consistent
+		// records are shared with the cache and with readers, so change a copy
 		sh := append([]ShardLoc(nil), o.Shards...)
 		sh[c.Index].Node = f.intern(c.To)
-		o.Shards = sh
+		upd := *o
+		upd.Shards = sh
+		f.replace(r, &upd)
 		if c.Clear {
 			f.clearDamage(c.Version, c.Index)
 		}
@@ -399,10 +488,11 @@ func (f *FSM) apply(c *cmd) result {
 // deleteVersion permanently removes one version (or marker) of key. If it was the current one the
 // next-newest takes over.
 func (f *FSM) deleteVersion(b *bucketState, key, version string) bool {
-	cur, ok := b.objs[key]
+	curR, ok := b.objs[key]
 	if !ok {
 		return false
 	}
+	cur := f.st.get(curR)
 	if vmatch(cur, version) {
 		if h := b.hist[key]; len(h) > 0 {
 			b.objs[key] = h[0]
@@ -418,9 +508,9 @@ func (f *FSM) deleteVersion(b *bucketState, key, version string) bool {
 		return true
 	}
 	h := b.hist[key]
-	for i, o := range h {
-		if vmatch(o, version) {
-			rest := append(append([]*Object(nil), h[:i]...), h[i+1:]...)
+	for i, hr := range h {
+		if o := f.st.get(hr); vmatch(o, version) {
+			rest := append(append([]oref(nil), h[:i]...), h[i+1:]...)
 			if len(rest) == 0 {
 				delete(b.hist, key)
 			} else {
@@ -440,8 +530,8 @@ func (f *FSM) retire(o *Object) {
 		f.gc[o.Version] = append([]ShardLoc(nil), o.Shards...)
 	}
 	for _, p := range o.Parts {
-		if po := f.versions[p.Version]; po != nil {
-			f.retire(po)
+		if pr, ok := f.versions[p.Version]; ok {
+			f.retire(f.st.get(pr))
 		}
 	}
 }
@@ -458,10 +548,10 @@ func (f *FSM) dropParts(id string, keep map[string]bool) {
 		doomed = append(doomed, hb.keys[i])
 	}
 	for _, k := range doomed {
-		o := hb.objs[k]
+		r := hb.objs[k]
 		hb.del(k)
 		if !keep[k] {
-			f.retire(o)
+			f.retire(f.st.get(r))
 		}
 	}
 }
@@ -490,8 +580,12 @@ func (f *FSM) completeUpload(c *cmd) result {
 		}
 		last = sel.Number
 		key := PartKey(up.ID, sel.Number)
-		po := hb.objs[key]
-		if po == nil || po.ETag != sel.ETag {
+		pr, ok := hb.objs[key]
+		if !ok {
+			return result{Code: "INVALID_PART", Msg: fmt.Sprintf("part %d missing or etag mismatch", sel.Number)}
+		}
+		po := f.st.get(pr)
+		if po.ETag != sel.ETag {
 			return result{Code: "INVALID_PART", Msg: fmt.Sprintf("part %d missing or etag mismatch", sel.Number)}
 		}
 		keep[key] = true
@@ -499,7 +593,7 @@ func (f *FSM) completeUpload(c *cmd) result {
 		total += po.Size
 		h.Write([]byte(po.ETag))
 	}
-	first := hb.objs[PartKey(up.ID, c.Sel[0].Number)]
+	first := f.st.get(hb.objs[PartKey(up.ID, c.Sel[0].Number)])
 	m := &Object{
 		Bucket: up.Bucket, Key: up.Key, Version: up.ID, Size: total,
 		ETag:        fmt.Sprintf("mp-%x-%d", h.Sum(nil), len(refs)),
@@ -508,10 +602,11 @@ func (f *FSM) completeUpload(c *cmd) result {
 	}
 	f.dropParts(up.ID, keep)
 	if old, ok := b.objs[up.Key]; ok {
-		f.supersede(b, old)
+		f.supersede(b, up.Key, old)
 	}
-	b.put(m)
-	f.versions[m.Version] = m
+	r := f.save(m)
+	b.put(up.Key, r)
+	f.versions[m.Version] = r
 	delete(f.uploads, up.ID)
 	return result{Object: m}
 }
@@ -554,18 +649,18 @@ func (f *FSM) query(q *query) result {
 		if !ok {
 			return errResult("BUCKET_NOT_FOUND")
 		}
-		o, ok := b.objs[q.Key]
+		r, ok := b.objs[q.Key]
 		if !ok {
 			return errResult("OBJECT_NOT_FOUND")
 		}
-		return result{Object: o}
+		return result{Object: f.st.get(r)}
 
 	case qGetVersion:
-		o, ok := f.versions[q.Version]
+		r, ok := f.versions[q.Version]
 		if !ok {
 			return errResult("OBJECT_NOT_FOUND")
 		}
-		return result{Object: o}
+		return result{Object: f.st.get(r)}
 
 	case qList:
 		b, ok := f.buckets[q.Bucket]
@@ -589,7 +684,7 @@ func (f *FSM) query(q *query) result {
 			if !strings.HasPrefix(k, q.Prefix) {
 				break
 			}
-			o := b.objs[k]
+			o := f.st.get(b.objs[k])
 			if o.DeleteMarker {
 				continue
 			}
@@ -606,11 +701,13 @@ func (f *FSM) query(q *query) result {
 		if !ok {
 			return errResult("BUCKET_NOT_FOUND")
 		}
-		if o := b.objs[q.Key]; o != nil && vmatch(o, q.Version) {
-			return result{Object: o}
+		if r, ok := b.objs[q.Key]; ok {
+			if o := f.st.get(r); vmatch(o, q.Version) {
+				return result{Object: o}
+			}
 		}
-		for _, o := range b.hist[q.Key] {
-			if vmatch(o, q.Version) {
+		for _, hr := range b.hist[q.Key] {
+			if o := f.st.get(hr); vmatch(o, q.Version) {
 				return result{Object: o}
 			}
 		}
@@ -629,11 +726,11 @@ func (f *FSM) query(q *query) result {
 			if !strings.HasPrefix(k, q.Prefix) {
 				break
 			}
-			seq := append([]*Object{b.objs[k]}, b.hist[k]...)
+			seq := append([]oref{b.objs[k]}, b.hist[k]...)
 			from := 0
 			if k == q.After && q.Version != "" {
-				for j, o := range seq {
-					if vmatch(o, q.Version) {
+				for j, sr := range seq {
+					if vmatch(f.st.get(sr), q.Version) {
 						from = j + 1
 						break
 					}
@@ -647,7 +744,7 @@ func (f *FSM) query(q *query) result {
 					res.Next, res.NextVer = last.Key, last.Version
 					return res
 				}
-				o := seq[j]
+				o := f.st.get(seq[j])
 				vid := o.Version
 				if o.Null {
 					vid = "null"
@@ -717,8 +814,8 @@ func (f *FSM) query(q *query) result {
 		// live versions only; anything else (retired, never committed) is simply absent
 		var res result
 		for _, v := range q.Versions {
-			if o, ok := f.versions[v]; ok {
-				res.Objects = append(res.Objects, o)
+			if r, ok := f.versions[v]; ok {
+				res.Objects = append(res.Objects, f.st.get(r))
 			}
 		}
 		return res
@@ -751,16 +848,17 @@ func (f *FSM) query(q *query) result {
 					return res
 				}
 				k := b.keys[i]
-				group := append([]*Object{b.objs[k]}, b.hist[k]...)
-				for _, o := range group {
+				group := append([]oref{b.objs[k]}, b.hist[k]...)
+				for _, gr := range group {
+					o := f.st.get(gr)
 					if o.DeleteMarker {
 						continue
 					}
 					res.Objects = append(res.Objects, o)
 					// a manifest owns no shards; the audit needs its parts as first-class objects
 					for _, p := range o.Parts {
-						if po := f.versions[p.Version]; po != nil {
-							res.Objects = append(res.Objects, po)
+						if pr, ok := f.versions[p.Version]; ok {
+							res.Objects = append(res.Objects, f.st.get(pr))
 						}
 					}
 				}
@@ -785,8 +883,8 @@ func (f *FSM) query(q *query) result {
 
 	case qStats:
 		s := &Stats{Buckets: len(f.buckets), Objects: len(f.versions), GCQueued: len(f.gc), Nodes: len(f.nodes)}
-		for _, o := range f.versions {
-			s.Bytes += o.Size
+		for _, r := range f.versions {
+			s.Bytes += r.size
 		}
 		for _, m := range f.damaged {
 			s.Damaged += len(m)
@@ -803,58 +901,102 @@ func clampLimit(n, def int) int {
 	return n
 }
 
-type snapshot struct {
-	Buckets []Bucket              `json:"buckets"`
-	Objects []*Object             `json:"objects"`
-	Nodes   []*Node               `json:"nodes"`
-	Damaged []Damage              `json:"damaged"`
-	GC      map[string][]ShardLoc `json:"gc"`
-	Parts   []*Object             `json:"parts,omitempty"`
-	Uploads []*Upload             `json:"uploads,omitempty"`
-	Hist    []*Object             `json:"hist,omitempty"` // older versions, per key newest first
-}
-
+// Snapshot streams records straight from the store into the gzip writer, so taking one does not
+// pull every object back onto the heap.
 func (f *FSM) Snapshot() ([]byte, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	s := snapshot{GC: f.gc}
-	for _, b := range f.buckets {
-		s.Buckets = append(s.Buckets, b.Bucket)
-		for _, k := range b.keys {
-			o := b.objs[k]
-			s.Objects = append(s.Objects, o)
-			for _, p := range o.Parts {
-				if po := f.versions[p.Version]; po != nil {
-					s.Parts = append(s.Parts, po)
-				}
-			}
-			for _, h := range b.hist[k] {
-				s.Hist = append(s.Hist, h)
-				for _, p := range h.Parts {
-					if po := f.versions[p.Version]; po != nil {
-						s.Parts = append(s.Parts, po)
-					}
-				}
-			}
-		}
-	}
-	for _, n := range f.nodes {
-		s.Nodes = append(s.Nodes, n)
-	}
-	for _, u := range f.uploads {
-		s.Uploads = append(s.Uploads, u)
-	}
-	for _, m := range f.damaged {
-		for _, d := range m {
-			s.Damaged = append(s.Damaged, d)
-		}
-	}
-	// gzip: the JSON is extremely repetitive (node ids, field names), ~10x smaller on disk and on the wire
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
-	if err := json.NewEncoder(zw).Encode(s); err != nil {
-		return nil, err
+	enc := json.NewEncoder(zw)
+
+	var buckets []Bucket
+	names := make([]string, 0, len(f.buckets))
+	for n := range f.buckets {
+		names = append(names, n)
 	}
+	sort.Strings(names)
+	for _, n := range names {
+		buckets = append(buckets, f.buckets[n].Bucket)
+	}
+	io.WriteString(zw, `{"buckets":`)
+	enc.Encode(buckets)
+
+	array := func(name string, each func(emit func(any))) {
+		io.WriteString(zw, `,"`+name+`":[`)
+		first := true
+		each(func(v any) {
+			if !first {
+				io.WriteString(zw, ",")
+			}
+			first = false
+			if r, ok := v.(oref); ok { // records are already json
+				zw.Write(f.st.raw(r))
+				return
+			}
+			enc.Encode(v)
+		})
+		io.WriteString(zw, "]")
+	}
+
+	var parts []oref
+	addParts := func(r oref) {
+		if !r.mp {
+			return
+		}
+		for _, p := range f.st.get(r).Parts {
+			if pr, ok := f.versions[p.Version]; ok {
+				parts = append(parts, pr)
+			}
+		}
+	}
+	array("objects", func(emit func(any)) {
+		for _, n := range names {
+			b := f.buckets[n]
+			for _, k := range b.keys {
+				r := b.objs[k]
+				emit(r)
+				addParts(r)
+			}
+		}
+	})
+	array("hist", func(emit func(any)) {
+		for _, n := range names {
+			b := f.buckets[n]
+			for _, k := range b.keys {
+				for _, hr := range b.hist[k] {
+					emit(hr)
+					addParts(hr)
+				}
+			}
+		}
+	})
+	array("parts", func(emit func(any)) {
+		for _, pr := range parts {
+			emit(pr)
+		}
+	})
+	array("nodes", func(emit func(any)) {
+		for _, n := range f.nodes {
+			emit(n)
+		}
+	})
+	array("uploads", func(emit func(any)) {
+		for _, u := range f.uploads {
+			emit(u)
+		}
+	})
+	array("damaged", func(emit func(any)) {
+		for _, m := range f.damaged {
+			for _, d := range m {
+				emit(d)
+			}
+		}
+	})
+	io.WriteString(zw, `,"gc":`)
+	enc.Encode(f.gc)
+	io.WriteString(zw, "}")
+	// gzip: the JSON is extremely repetitive (node ids, field names), ~10x smaller on disk and on the wire
 	if err := zw.Close(); err != nil {
 		return nil, err
 	}
@@ -862,66 +1004,151 @@ func (f *FSM) Snapshot() ([]byte, error) {
 }
 
 func (f *FSM) Restore(data []byte) error {
+	var r io.Reader = bytes.NewReader(data)
 	if len(data) > 2 && data[0] == 0x1f && data[1] == 0x8b {
-		zr, err := gzip.NewReader(bytes.NewReader(data))
+		zr, err := gzip.NewReader(r)
 		if err != nil {
 			return fmt.Errorf("meta: bad snapshot: %w", err)
 		}
-		if data, err = io.ReadAll(zr); err != nil {
-			return fmt.Errorf("meta: bad snapshot: %w", err)
-		}
-	}
-	var s snapshot
-	if err := json.Unmarshal(data, &s); err != nil {
-		return fmt.Errorf("meta: bad snapshot: %w", err)
+		r = zr
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reset()
-	for _, b := range s.Buckets {
-		f.buckets[b.Name] = &bucketState{Bucket: b, objs: map[string]*Object{}}
-	}
-	for _, o := range s.Objects {
-		if f.buckets[o.Bucket] == nil { // hidden mpu bucket carries staged parts
-			f.buckets[o.Bucket] = &bucketState{Bucket: Bucket{Name: o.Bucket}, objs: map[string]*Object{}}
-		}
-		f.internObj(o)
-		f.buckets[o.Bucket].put(o)
-		if !o.DeleteMarker {
-			f.versions[o.Version] = o
-		}
-	}
-	for _, h := range s.Hist {
-		f.internObj(h)
-		b := f.buckets[h.Bucket]
-		if b == nil {
-			continue
-		}
-		if b.hist == nil {
-			b.hist = map[string][]*Object{}
-		}
-		b.hist[h.Key] = append(b.hist[h.Key], h) // snapshot order is newest first, so appending keeps it
-		if !h.DeleteMarker {
-			f.versions[h.Version] = h
-		}
-	}
-	for _, po := range s.Parts {
-		f.internObj(po)
-		f.versions[po.Version] = po
-	}
-	for _, u := range s.Uploads {
-		f.uploads[u.ID] = u
-	}
-	for _, n := range s.Nodes {
-		f.nodes[n.ID] = n
-	}
-	for _, d := range s.Damaged {
-		f.markDamaged(d.Version, d.Index, d.Reason, d.Since)
-	}
-	if s.GC != nil {
-		f.gc = s.GC
+	if err := f.load(json.NewDecoder(r)); err != nil {
+		return fmt.Errorf("meta: bad snapshot: %w", err)
 	}
 	return nil
+}
+
+// load reads the snapshot one record at a time. Key order does not matter except that buckets must
+// precede objects, which both the writer above and the older struct-based writer guarantee.
+func (f *FSM) load(dec *json.Decoder) error {
+	if _, err := dec.Token(); err != nil { // {
+		return err
+	}
+	each := func(fn func() error) error {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if tok == nil { // old snapshots wrote null for empty slices
+			return nil
+		}
+		for dec.More() {
+			if err := fn(); err != nil {
+				return err
+			}
+		}
+		_, err = dec.Token() // ]
+		return err
+	}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		var derr error
+		switch tok {
+		case "buckets":
+			derr = each(func() error {
+				var b Bucket
+				if err := dec.Decode(&b); err != nil {
+					return err
+				}
+				f.buckets[b.Name] = &bucketState{Bucket: b, objs: map[string]oref{}}
+				return nil
+			})
+		case "objects":
+			derr = each(func() error {
+				o := new(Object)
+				if err := dec.Decode(o); err != nil {
+					return err
+				}
+				if f.buckets[o.Bucket] == nil { // hidden mpu bucket carries staged parts
+					f.buckets[o.Bucket] = &bucketState{Bucket: Bucket{Name: o.Bucket}, objs: map[string]oref{}}
+				}
+				f.internObj(o)
+				r := f.save(o)
+				f.buckets[o.Bucket].put(o.Key, r)
+				if !o.DeleteMarker {
+					f.versions[o.Version] = r
+				}
+				return nil
+			})
+		case "hist":
+			derr = each(func() error {
+				h := new(Object)
+				if err := dec.Decode(h); err != nil {
+					return err
+				}
+				b := f.buckets[h.Bucket]
+				if b == nil {
+					return nil
+				}
+				f.internObj(h)
+				r := f.save(h)
+				if b.hist == nil {
+					b.hist = map[string][]oref{}
+				}
+				b.hist[h.Key] = append(b.hist[h.Key], r) // snapshot order is newest first, so appending keeps it
+				if !h.DeleteMarker {
+					f.versions[h.Version] = r
+				}
+				return nil
+			})
+		case "parts":
+			derr = each(func() error {
+				po := new(Object)
+				if err := dec.Decode(po); err != nil {
+					return err
+				}
+				f.internObj(po)
+				f.versions[po.Version] = f.save(po)
+				return nil
+			})
+		case "uploads":
+			derr = each(func() error {
+				u := new(Upload)
+				if err := dec.Decode(u); err != nil {
+					return err
+				}
+				f.uploads[u.ID] = u
+				return nil
+			})
+		case "nodes":
+			derr = each(func() error {
+				n := new(Node)
+				if err := dec.Decode(n); err != nil {
+					return err
+				}
+				f.nodes[n.ID] = n
+				return nil
+			})
+		case "damaged":
+			derr = each(func() error {
+				var d Damage
+				if err := dec.Decode(&d); err != nil {
+					return err
+				}
+				f.markDamaged(d.Version, d.Index, d.Reason, d.Since)
+				return nil
+			})
+		case "gc":
+			var gc map[string][]ShardLoc
+			if derr = dec.Decode(&gc); derr == nil && gc != nil {
+				f.gc = gc
+			}
+		default:
+			var skip json.RawMessage
+			derr = dec.Decode(&skip)
+		}
+		if derr != nil {
+			return derr
+		}
+	}
+	_, err := dec.Token() // }
+	return err
 }
 
 func mustJSON(v any) []byte {

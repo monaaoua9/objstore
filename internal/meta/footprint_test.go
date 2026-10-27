@@ -4,17 +4,22 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
 )
 
-// not an assertion on exact numbers (they move with the Go version); it pins the order of magnitude
-// and prints the figures quoted in the architecture doc
+// records are spilled to a file, so this measures the in-memory index only: key, sorted-key slot,
+// two map entries. Not exact (it moves with the Go version); it pins the order of magnitude.
 func TestMetadataFootprint(t *testing.T) {
 	const n = 30_000
 	ctx := context.Background()
-	f := NewFSM()
+	f, err := NewFSMAt(filepath.Join(t.TempDir(), "spill"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(f.Close)
 	c := &Client{direct{f}}
 	c.CreateBucket(ctx, "big")
 
@@ -35,6 +40,7 @@ func TestMetadataFootprint(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	f.st.dropCache() // a fixed-size cache would skew the per-object figure at this n
 	runtime.GC()
 	runtime.ReadMemStats(&after)
 	per := (after.HeapAlloc - before.HeapAlloc) / n
@@ -45,12 +51,13 @@ func TestMetadataFootprint(t *testing.T) {
 		t.Fatal(err)
 	}
 	took := time.Since(t0)
-	g := NewFSM()
+	g, _ := NewFSMAt(filepath.Join(t.TempDir(), "spill"))
+	t.Cleanup(g.Close)
 	if err := g.Restore(snap); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("%d objects: ~%d bytes of heap each, snapshot %d MiB gzip'd (%d bytes/object) in %v", n, per, len(snap)>>20, len(snap)/n, took)
-	if per > 2500 {
+	if per > 450 {
 		t.Fatalf("heap per object grew to %d bytes", per)
 	}
 	if st, _ := (&Client{direct{g}}).Stats(ctx); st.Objects != n {

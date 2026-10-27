@@ -256,10 +256,17 @@ files, is the usual path, which also makes passes idempotent and safe to repeat 
 
 ## Trade-offs, honestly
 
-* **Metadata lives in RAM** on each voter (snapshotted to disk, gzip'd, strings interned). Measured
-  by `TestMetadataFootprint`: roughly 650 bytes of heap per object version with 6 shards, i.e. ~650 MB
-  per million objects, snapshot a few tens of MB. Fine up to a few million objects per voter; beyond
-  that you want a disk-backed index (snapshots now travel in chunks, but are still assembled in memory) or to shard the keyspace across several Raft groups.
+* **The metadata index lives in RAM, the records do not.** Each voter keeps, per object version, the
+  key (plus its slot in a sorted key slice) and two map entries (key -> record, version -> record); the
+  record itself (placement, ETag, user metadata...) is JSON in an append-only spill file next to the Raft
+  state, read back through a small cache. Measured by `TestMetadataFootprint`: about 275 bytes of heap per
+  object version, down from ~650 when whole objects were held, so ~275 MB per million objects. The spill
+  file is a cache of Raft state, not a second source of truth: it is truncated on start and rebuilt from
+  snapshot + log replay, and compacted when the bytes appended since the last compaction pass twice the
+  live size. Snapshots copy records straight from the file into the gzip stream and restore reads them back
+  one at a time, so neither holds the object set on the heap (the compressed snapshot is still assembled in
+  memory and sent in chunks). Keys and version ids are still in RAM; past tens of millions of objects per voter
+  you want an on-disk ordered index or several Raft groups, each owning a slice of the keyspace.
 * **One shard file per (object, shard)** keeps the model simple and repair surgical, but it is a lot of
   small files for small objects. A production system would pack small objects or use an LSM/segment store.
 * **Streaming a rebuild reads `K` shards over the network** (the classical RS repair cost); LRC or
