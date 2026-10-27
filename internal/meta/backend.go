@@ -81,6 +81,9 @@ func (b *HTTPBackend) addrs() []string {
 	return b.Addrs
 }
 
+// Voters is the address list currently in use.
+func (b *HTTPBackend) Voters() []string { return b.addrs() }
+
 // Refresh asks any reachable voter for the current voter set and adopts it, so storage nodes keep
 // working after voters have been added or replaced.
 func (b *HTTPBackend) Refresh(ctx context.Context) error {

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/monaaoua9/objstore/internal/meta"
 )
 
 func (c *tcluster) startJoiner(id string) string {
@@ -94,9 +96,23 @@ func TestReplaceAllVoters(t *testing.T) {
 	eventually(t, 10*time.Second, "voter list shrinks to the new three", func() bool {
 		return strings.Join(c.voterIDs("n7"), ",") == "n7,n8,n9"
 	})
+
+	// the swap can finish inside one refresh tick; killing the old voters before the storage nodes
+	// have heard of the new ones would orphan them for good
+	eventually(t, 10*time.Second, "storage nodes learn a new voter", func() bool {
+		for _, id := range []string{"n4", "n5", "n6"} {
+			known := false
+			for _, a := range c.nodes[id].Meta.B.(*meta.HTTPBackend).Voters() {
+				known = known || a == c.nodes["n7"].Addr()
+			}
+			if !known {
+				return false
+			}
+		}
+		return true
+	})
 	c.kill("n1", "n2", "n3")
 
-	// n4 only ever heard of n1..n3; it must have refreshed the list by now
 	eventually(t, 30*time.Second, "writes through a storage-only node after the swap", func() bool {
 		resp, _ := c.tryDo("PUT", c.base("n4")+"/api/v1/buckets/after", nil)
 		return resp != nil && (resp.StatusCode == 201 || resp.StatusCode == 409)
