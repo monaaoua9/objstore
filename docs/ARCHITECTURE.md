@@ -179,7 +179,7 @@ the entry is **appended**, not committed. Consequences, all handled in `membersh
   for votes from nodes outside the current config are ignored, so a removed node coming back can't
   bump terms. A leader that removed itself steps down once the entry commits.
 * Replicators are started and retired dynamically; the HTTP transport learns addresses from config
-  entries. Storage-only nodes poll `/internal/meta/voters` and re-point their metadata client. They can only learn the new set from a voter they already know, so when replacing every voter, wait for one poll interval (`--voter-refresh`) before stopping the old ones; a removed voter still answers with the last set it saw.
+  entries. Storage-only nodes poll `/internal/meta/voters` and re-point their metadata client. They can only learn the new set from a voter they already know, so when replacing every voter, wait for one poll interval (10s) before stopping the old ones; a removed voter still answers with the last set it saw.
 
 The FSM is deterministic: timestamps are stamped by the proposer, never read inside `Apply`.
 
