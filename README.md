@@ -1,5 +1,7 @@
 # objstore — distributed, fault-tolerant object storage engine
 
+[![ci](https://github.com/monaaoua9/objstore/actions/workflows/ci.yml/badge.svg)](https://github.com/monaaoua9/objstore/actions/workflows/ci.yml) [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Erasure-coded object storage in Go with a Raft-replicated metadata plane. Standard library only: no
 third-party modules, one static binary.
 
