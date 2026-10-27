@@ -46,7 +46,10 @@ func TestClusterRestartKeepsEverything(t *testing.T) {
 	for k, d := range objs {
 		c.mustGet("n2", "bkt", k, d)
 	}
-	// and it still takes writes
-	c.put("n5", "bkt", "post-restart", []byte("alive"))
+	// and it still takes writes, once the probe has marked every restarted node healthy again
+	eventually(t, 30*time.Second, "writes accepted after restart", func() bool {
+		resp, _ := c.tryDo("PUT", c.base("n5")+"/api/v1/buckets/bkt/objects/post-restart", bytesReader([]byte("alive")))
+		return resp != nil && resp.StatusCode == 201
+	})
 	c.mustGet("n1", "bkt", "post-restart", []byte("alive"))
 }
