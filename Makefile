@@ -19,7 +19,7 @@ vet:
 	@test -z "$$(gofmt -l .)" || (echo "gofmt needed:"; gofmt -l .; exit 1)
 
 e2e: build
-	./scripts/e2e.sh
+	bash scripts/e2e.sh
 
 cluster: build
 	./scripts/dev-cluster.sh
