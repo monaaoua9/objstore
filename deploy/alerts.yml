@@ -1,0 +1,68 @@
+# Prometheus alert rules for objstore. Metric names are the ones the nodes export on /metrics.
+groups:
+  - name: objstore
+    rules:
+      - alert: ObjstoreNoLeader
+        expr: sum(objstore_raft_is_leader) != 1
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "metadata group has {{ $value }} leaders (want exactly 1)"
+
+      - alert: ObjstoreLeaderChurn
+        expr: changes(objstore_raft_term[15m]) > 3
+        labels: { severity: warning }
+        annotations:
+          summary: "raft term changed {{ $value }} times in 15m on {{ $labels.instance }}; elections keep happening"
+
+      - alert: ObjstoreNodeWentDown
+        expr: increase(objstore_node_down_events_total[10m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "a storage node was declared down in the last 10m (repairs start after --repair-delay)"
+
+      - alert: ObjstoreRepairFailing
+        expr: increase(objstore_repair_failures_total[15m]) > 5
+        for: 15m
+        labels: { severity: critical }
+        annotations:
+          summary: "repairs are failing on {{ $labels.instance }}; redundancy is not being restored"
+
+      - alert: ObjstoreBitrotFound
+        expr: increase(objstore_scrub_corrupt_total[1h]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "scrubber quarantined corrupt shards on {{ $labels.instance }}; check the disk (SMART) if it repeats"
+
+      - alert: ObjstoreScrubStale
+        expr: time() - objstore_scrub_last_pass_unix > 8 * 86400
+        labels: { severity: warning }
+        annotations:
+          summary: "no completed scrub pass on {{ $labels.instance }} for 8 days"
+
+      - alert: ObjstoreDegradedWrites
+        expr: rate(objstore_put_degraded_total[10m]) > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "writes are landing with fewer than k+m shards; durability margin is reduced"
+
+      - alert: ObjstoreReadErrors
+        expr: rate(objstore_get_errors_total[5m]) / clamp_min(rate(objstore_get_total[5m]), 1e-9) > 0.01
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "more than 1% of GETs failing on {{ $labels.instance }}"
+
+      - alert: ObjstoreWriteErrors
+        expr: rate(objstore_put_errors_total[5m]) / clamp_min(rate(objstore_put_total[5m]), 1e-9) > 0.01
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "more than 1% of PUTs failing on {{ $labels.instance }}"
+
+      - alert: ObjstoreFramesRejected
+        expr: increase(objstore_node_rejected_frames_total[10m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.instance }} rejected shard frames with bad checksums on the wire"

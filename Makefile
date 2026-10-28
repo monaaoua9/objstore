@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: build test race bench vet fmt cluster docker clean
+.PHONY: build test race bench vet fmt cluster docker e2e clean
 
 build:
 	$(GO) build -trimpath -o bin/ ./cmd/...
@@ -17,6 +17,9 @@ bench:
 vet:
 	$(GO) vet ./...
 	@test -z "$$(gofmt -l .)" || (echo "gofmt needed:"; gofmt -l .; exit 1)
+
+e2e: build
+	./scripts/e2e.sh
 
 cluster: build
 	./scripts/dev-cluster.sh

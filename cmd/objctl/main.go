@@ -33,7 +33,7 @@ const usage = `usage: objctl [-e endpoint] [-t token] <command> [args]
   voters                        metadata voters (raft members)
   addvoter <id> <host:port>     add a running --join node as a voter
   rmvoter <id>                  remove a voter from the metadata group
-  versioning <bucket>           turn on object versioning (cannot be undone)
+  versioning <bucket> [suspend] turn on object versioning, or suspend it (history is kept)
   versions <bucket> [prefix]    every version and delete marker (get/stat/rm accept -v <version>)
   lifecycle <bucket> [set <file|->|clear]   show, replace or remove expiry rules (JSON: {"rules":[...]})
 `
@@ -103,7 +103,11 @@ func main() {
 		err = simple("DELETE", "/buckets/"+a[1]+"/objects/"+a[2]+vq(), nil, 204)
 	case "versioning":
 		need(1)
-		err = simple("PUT", "/buckets/"+a[1]+"/versioning", strings.NewReader(`{"enabled":true}`), 200)
+		on := "true"
+		if len(a) > 2 && a[2] == "suspend" {
+			on = "false"
+		}
+		err = simple("PUT", "/buckets/"+a[1]+"/versioning", strings.NewReader(`{"enabled":`+on+`}`), 200)
 	case "lifecycle":
 		need(1)
 		switch {
