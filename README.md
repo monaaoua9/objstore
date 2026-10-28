@@ -129,6 +129,15 @@ movement, zones), WAL (torn tails), frames and the state machine, there are:
 * **Raft**: election, ordered replication under concurrency, leader failover with healing partition,
   minority-can't-commit, snapshot catch-up, full-cluster restart from disk, ReadIndex linearizability
   incl. a deposed leader refusing reads.
+* **Linearizability under a nemesis** (`TestLinearizableUnderNemesis`): five Raft nodes, concurrent
+  writers and ReadIndex readers, while a nemesis isolates nodes and leaders, splits the cluster 2|3 and
+  crashes/restarts nodes with snapshots forced every 40 entries. The history is checked against the final
+  log: every acknowledged write present exactly once, real-time order respected, every read a prefix that
+  includes everything acknowledged before it started and nothing begun after it ended, reads never go
+  backwards. `TestVerifyCatchesViolations` feeds the checker bad histories to prove it can fail. The fault
+  schedule replays with `RAFT_SEED=<seed>`.
+* **Fuzzing** (`go test -fuzz`): frame reader and round trip, aws-chunked decoder, Range parsing, and
+  loading damaged WAL/snapshot files.
 * **Chaos**: writers and readers run while storage nodes are repeatedly killed and restarted; no read ever returns wrong bytes and every acknowledged write is intact afterwards.
 * **Cluster integration** (real HTTP/2 between in-process nodes): ranges/conditionals/paging, GC on
   delete+overwrite, concurrent clients, reads with `m` nodes killed, automatic rebuild after node loss,
