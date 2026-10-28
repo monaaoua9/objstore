@@ -33,6 +33,17 @@ retry() {
   return 1
 }
 
+# a node that just started has not seen the others yet, so its first reads can come back 503
+read_is() { # endpoint key sha256
+  local got
+  for _ in $(seq 20); do
+    got=$(EP=$1 ctl get smoke "$2" - 2>/dev/null | sha256sum | cut -d' ' -f1) || true
+    [ "$got" = "$3" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+
 for i in 1 2 3 4 5; do start "$i"; done
 retry 30 ctl status || fail "cluster did not come up"
 retry 30 ctl mb smoke || fail "create bucket"
@@ -67,7 +78,6 @@ echo "ok: leader loss, new leader, write and read"
 # the first voter returns from its disk and catches up
 start 1
 retry 40 ctl status || fail "restarted voter not serving"
-got=$(EP=1 ctl get smoke obj2 - | sha256sum | cut -d' ' -f1)
-[ "$got" = "$want2" ] || fail "restarted voter cannot read the new object"
+read_is 1 obj2 "$want2" || fail "restarted voter cannot read the new object"
 echo "ok: restarted voter caught up"
 echo "e2e passed"
