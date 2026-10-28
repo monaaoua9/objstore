@@ -136,6 +136,9 @@ movement, zones), WAL (torn tails), frames and the state machine, there are:
   includes everything acknowledged before it started and nothing begun after it ended, reads never go
   backwards. `TestVerifyCatchesViolations` feeds the checker bad histories to prove it can fail. The fault
   schedule replays with `RAFT_SEED=<seed>`.
+* **Real processes** (`make e2e`, also in CI): five `objstored` processes, write and read back through
+  every node, two nodes `kill -9`'d (degraded read), a voter killed (new leader, writes continue), the
+  voter restarted from its disk and caught up.
 * **Fuzzing** (`go test -fuzz`): frame reader and round trip, aws-chunked decoder, Range parsing, and
   loading damaged WAL/snapshot files.
 * **Chaos**: writers and readers run while storage nodes are repeatedly killed and restarted; no read ever returns wrong bytes and every acknowledged write is intact afterwards.
@@ -144,6 +147,9 @@ movement, zones), WAL (torn tails), frames and the state machine, there are:
   bitrot found by the scrubber and by the read path, deleted shard files found by the audit, Raft leader
   loss, node join → rebalance → drain, writes refused (and no ghost object) without quorum, orphan and
   stale-copy cleanup, whole-cluster restart, bounded-memory 256 MiB streaming.
+
+Prometheus alert rules for the exported metrics (no leader, election churn, node down, failing repairs,
+bitrot, stale scrub, degraded writes, error ratios) are in [deploy/alerts.yml](deploy/alerts.yml).
 
 ## Layout
 
