@@ -162,7 +162,7 @@ internal/
   erasure  hashring  frame  blobstore  ec          data plane building blocks
   raft  meta  cluster  shardrpc  httpx             consensus, metadata, networking
   engine  gateway  repair  scrub  metrics  app     orchestration and operations
-docs/ARCHITECTURE.md
+docs/ARCHITECTURE.md  DESIGN.md  BENCHMARKS.md
 ```
 
 ## Known limits
