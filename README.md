@@ -17,7 +17,7 @@ third-party modules, one static binary.
   moves through the system with < 30 MiB of heap growth, and memory per request is independent of
   object size.
 
-Design write-up with data-flow diagrams, failure matrix and trade-offs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Design write-up with data-flow diagrams, failure matrix and trade-offs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The short version of the decisions: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Try it
 
