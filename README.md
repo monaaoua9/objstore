@@ -123,6 +123,8 @@ make race        # everything, with the race detector (~2 min)
 make bench
 go run ./cmd/objbench -e http://127.0.0.1:9001 -size 1048576 -n 200 -c 16   # cluster throughput + p50/p95/p99
 ```
+
+Numbers from a 5-process cluster on one laptop and the erasure codec throughput (about 500 MB/s for 10+4) are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md), with the caveats.
 Beyond unit tests for the codec (every erasure pattern for several `k,m`), ring (balance, minimal
 movement, zones), WAL (torn tails), frames and the state machine, there are:
 
